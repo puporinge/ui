@@ -11,6 +11,9 @@ import contextlib
 import matplotlib.pyplot as plt
 from openai import OpenAI
 from PIL import Image
+import re
+import pandas as pd
+import plotly.express as px
 
 # 加载环境变量
 load_dotenv()
@@ -29,6 +32,77 @@ client = OpenAI(
     api_key=OPENAI_API_KEY,
     base_url=OPENAI_API_BASE
 )
+
+
+# MySQL数据库连接配置
+def create_connection():
+    connection = None
+    try:
+        connection = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+    except Error as e:
+        st.error(f"Error: '{e}'")
+    return connection
+
+
+# 创建数据库连接
+conn = create_connection()
+
+
+def sql_in(cont):
+    sql_string = cont[7:-3]
+    create_table_pattern = re.compile(r"CREATE TABLE.*?;", re.DOTALL)
+    insert_data_pattern = re.compile(r"INSERT INTO.*?;", re.DOTALL)
+    table_name_pattern = re.compile(r"CREATE TABLE\s+(\w+)\s*\(", re.IGNORECASE)
+    create_table_sql = create_table_pattern.search(sql_string).group(0)
+    insert_data_sql = insert_data_pattern.findall(sql_string)
+
+    matches = table_name_pattern.findall(sql_string)
+    if matches:
+        for match in matches:
+            mn = match
+    try:
+        cursor = conn.cursor()
+        query = f"SHOW TABLES LIKE '{mn}'"
+        cursor.execute(query)
+        result = cursor.fetchone()
+        if not result:
+            cursor.execute(create_table_sql)
+            conn.commit()
+        else:
+            st.write("already exist table,insert the data")
+        for ins_sql in insert_data_sql:
+            cursor.execute(ins_sql)
+            conn.commit()
+        cursor.close()
+        st.write("success insert into the database")
+        return True
+    except Error as e:
+        st.error(f"Error: '{e}'")
+        return False
+
+
+def query_data(sql):
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql)
+            result = cursor.fetchall()
+            return result
+    except Error as e:
+        st.error(f"Error: '{e}'")
+        return False
+
+
+def get_table_names():
+    sql = "SHOW TABLES"
+    result = query_data(sql)
+    table_names = [list(table)[0] for table in result]
+    filtered_table_names = [table for table in table_names if table != 'users']
+    return filtered_table_names
 
 
 def ask(a):
@@ -57,7 +131,7 @@ def ask3(a):
         messages=[
             {
                 "role": "system",
-                "content": "给出主要财务数据的图的python代码，并在代码中加入plt.rcParams['font.sans-serif'] = ['Arial Unicode MS'] plt.rcParams['axes.unicode_minus'] = False,只回答代码"
+                "content": "从pdf中获取该公司的各种财务数据，并且给出sql语句，要求创建一张表，表名为公司拼音，有三列，一列为数据名称，一列为具体数据，一列为年份，只回答sql语句"
             },
             {
                 "role": "user",
@@ -68,7 +142,9 @@ def ask3(a):
     )
     for item in response.choices[0].message:
         if item[0] == 'content':
-            st.write(item[1])
+            sql_in(item[1])
+
+
 def ask2(a):
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -87,24 +163,6 @@ def ask2(a):
     for item in response.choices[0].message:
         if item[0] == 'content':
             st.write(item[1])
-
-# MySQL数据库连接配置
-def create_connection():
-    connection = None
-    try:
-        connection = mysql.connector.connect(
-            host=DB_HOST,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
-        )
-    except Error as e:
-        st.error(f"Error: '{e}'")
-    return connection
-
-
-# 创建数据库连接
-conn = create_connection()
 
 
 # 密码哈希处理函数
@@ -147,6 +205,13 @@ st.title("报表分析系统")
 # 检查用户是否已经登录
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
+
+if 'button_clicked' not in st.session_state:
+    st.session_state.button_clicked = False
+
+
+def on_button_click():
+    st.session_state.button_clicked = True
 
 
 # 检查是否为管理员登录
@@ -266,34 +331,30 @@ if st.session_state.logged_in:
                             ask2("\n".join(summary_cont))
                     else:
                         st.error("请先选择页码，且选择页数不能超过20页")
-                if st.button("手动画图"):
+                if st.button("数据提取"):
                     if len(summary_selected_pages) > 0 and len(summary_selected_pages) <= 20:
                         with st.spinner('正在处理，请稍候...'):
                             ask3("\n".join(summary_cont))
                     else:
                         st.error("请先选择页码，且选择页数不能超过20页")
-
-    if st.session_state.is_admin:
-        with st.expander("输入Python代码并执行"):
-            code = ace.st_ace(language='python', theme='monokai', keybinding='vscode', font_size=14, tab_size=4,
-                              show_gutter=True,
-                              wrap=True, show_print_margin=True, auto_update=True)
-
-            if st.button("执行代码"):
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    try:
-                        exec_globals = {}
-                        exec(code, exec_globals)
-                        st.success("代码执行成功")
-                    except Exception as e:
-                        st.error(f"代码执行出错: {e}")
-                st.subheader("代码输出")
-                st.text(output.getvalue())
-
-                # 如果代码中有生成图像的内容，显示图像
-                if "plt" in exec_globals:
-                    fig = exec_globals["plt"].gcf()  # 获取当前的Figure
-                    st.pyplot(fig)
-
-
+    if st.session_state.logged_in:
+        with st.expander("数据查看"):
+            if st.button("数据库表查看", on_click=on_button_click):
+                st.session_state.button_clicked = True
+            if st.session_state.button_clicked:
+                table_names = get_table_names()
+                selected_table = st.selectbox("选择要查看的表", table_names)
+                if selected_table:
+                    sql = f"SELECT * FROM {selected_table}"
+                    data = query_data(sql)
+                    df = pd.DataFrame(data)
+                    st.write(f"表 {selected_table} 的数据如下：")
+                    st.dataframe(df)
+                    df.columns = ['data_name', 'data_value', 'year']
+                    if not df.empty:
+                        data_names = df['data_name'].unique()
+                        selected_data_name = st.selectbox("选择数据名称", data_names)
+                        df_filtered = df[df['data_name'] == selected_data_name]
+                        fig = px.line(df_filtered, x='year', y='data_value',
+                                      title=f'{selected_data_name} 在不同年份的变化', markers=True)
+                        st.plotly_chart(fig)
